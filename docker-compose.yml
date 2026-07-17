@@ -1,0 +1,46 @@
+# Standalone PostgreSQL environment for apollon-aegis-collector.
+#
+# Independent from the /opt/apollon-aegis multi-service stack — separate
+# container name, network, host port (31110, since 31010 is already taken
+# by apollon-aegis-postgresql on the same host), and data directory.
+#
+# Usage:
+#   cd postgresql
+#   cp .env.example .env      # adjust credentials if needed
+#   docker compose up -d --build
+#   docker compose logs -f
+#   docker compose down       # data persists in ./data
+
+services:
+  postgresql:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: apollon-aegis-collector-postgresql:16
+    container_name: apollon-aegis-collector-postgresql
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-apollon}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-20tlwkr26!}
+      POSTGRES_DB: ${POSTGRES_DB:-apollon}
+      TZ: Asia/Seoul
+    ports:
+      # Bound to localhost only — this server is reachable from the public
+      # internet, so Postgres itself should not be. Use an SSH tunnel
+      # (ssh -L 31110:127.0.0.1:31110 user@host) to reach it remotely.
+      - "127.0.0.1:31110:5432"
+    volumes:
+      - ./data:/var/lib/postgresql/data
+      - ./init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-apollon} -d ${POSTGRES_DB:-apollon}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - apollon-aegis-collector-network
+
+networks:
+  apollon-aegis-collector-network:
+    name: apollon-aegis-collector-network
+    driver: bridge

@@ -23,11 +23,21 @@ postgresql/
 
 | 항목 | /opt/apollon-aegis (기존) | apollon-aegis-collector (이 프로젝트) |
 |---|---|---|
-| 컨테이너 이름 | `apollon-aegis-postgresql` | `apollon-aegis-collector-postgresql` |
+| 컨테이너 이름 | `apollon-aegis-postgresql` | `apollon-aegis-postgresql` ⚠️ 기존과 동일 (아래 경고 참고) |
 | 호스트 포트 | `31010` → `5432` | `31110` → `5432` |
 | 네트워크 | `apollon-aegis-network` | `apollon-aegis-collector-network` **+** `apollon-aegis-network`(공유) |
-| 이미지 | `postgres:16` (공식 이미지) | 커스텀 빌드: `pgvector/pgvector:pg16` 기반 |
+| 이미지 | `postgres:16` (공식 이미지) | 커스텀 빌드: `pgvector/pgvector:pg16` 기반, 이미지 태그는
+`apollon-aegis-collector-postgresql:16`로 구분됨 |
 | 계정/DB | `apollon` / `apollon` | 동일 (`apollon` / `apollon`) — 필요 시 `.env`에서 변경 가능 |
+
+> **⚠️ 컨테이너 이름 충돌 주의**
+> 이 프로젝트의 컨테이너 이름을 기존 `/opt/apollon-aegis` 스택의 postgres와 동일한
+> `apollon-aegis-postgresql`로 맞췄습니다. 같은 이름의 컨테이너는 같은 호스트에 동시에 뜰 수
+> 없으므로, 이 스택을 기동하기 전에 기존 `/opt/apollon-aegis`의 postgres 컨테이너를 먼저
+> 내리거나(`docker stop apollon-aegis-postgresql && docker rm apollon-aegis-postgresql`)
+> 이름이 겹치지 않도록 직접 조정해야 합니다. 그렇지 않으면 `docker compose up`이
+> `Conflict. The container name "/apollon-aegis-postgresql" is already in use` 오류로 실패합니다.
+> 이미지 태그(`apollon-aegis-collector-postgresql:16`)는 겹치지 않으니 그대로 뒀습니다.
 
 `apollon-aegis-network`는 `docker-compose.yml`에서 `external: true`로 선언되어 있어, 이 compose가
 그 네트워크를 만들지는 않고 이미 존재하는 네트워크에 붙기만 합니다(기존 `/opt/apollon-aegis`
@@ -50,7 +60,7 @@ docker compose logs -f postgresql
 접속 확인:
 
 ```bash
-docker exec -it apollon-aegis-collector-postgresql \
+docker exec -it apollon-aegis-postgresql \
   psql -U apollon -d apollon -c "\dx"     # vector 확장이 목록에 보이면 정상
 ```
 
@@ -174,7 +184,7 @@ cd postgresql/deploy
 ```
 
 - `apollon-aegis-network`가 없으면 생성하고, 있으면 그대로 둡니다.
-- `apollon-aegis-collector-postgresql` 컨테이너가 떠 있는데 그 네트워크에 안 붙어 있으면
+- `apollon-aegis-postgresql` 컨테이너가 떠 있는데 그 네트워크에 안 붙어 있으면
   `docker network connect`로 연결합니다. 이미 연결되어 있으면 아무 것도 하지 않습니다.
 - 몇 번을 다시 실행해도 안전합니다(멱등적).
 

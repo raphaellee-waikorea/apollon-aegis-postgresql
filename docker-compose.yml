@@ -27,7 +27,7 @@ services:
       context: .
       dockerfile: Dockerfile
     image: apollon-aegis-collector-postgresql:16
-    container_name: apollon-aegis-collector-postgresql
+    container_name: apollon-aegis-postgresql
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-apollon}

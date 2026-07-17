@@ -10,7 +10,7 @@
 #   docker build -t apollon-aegis-collector-postgresql:16 .
 #
 # Run standalone (no compose):
-#   docker run -d --name apollon-aegis-collector-postgresql \
+#   docker run -d --name apollon-aegis-postgresql \
 #     -e POSTGRES_USER=apollon \
 #     -e POSTGRES_PASSWORD=20tlwkr26! \
 #     -e POSTGRES_DB=apollon \

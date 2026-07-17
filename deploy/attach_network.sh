@@ -32,7 +32,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$SCRIPT_DIR/deploy.env"
-CONTAINER_NAME="apollon-aegis-collector-postgresql"
+CONTAINER_NAME="apollon-aegis-postgresql"
 SHARED_NETWORK="apollon-aegis-network"
 
 if [[ ! -f "$ENV_FILE" ]]; then

@@ -1,12 +1,22 @@
 # Standalone PostgreSQL environment for apollon-aegis-collector.
 #
-# Independent from the /opt/apollon-aegis multi-service stack — separate
-# container name, network, host port (31110, since 31010 is already taken
-# by apollon-aegis-postgresql on the same host), and data directory.
+# Independent from the /opt/apollon-aegis multi-service stack in terms of
+# container name, host port (31110, since 31010 is already taken by
+# apollon-aegis-postgresql on the same host), and data directory — but it
+# also attaches to the existing apollon-aegis-network so it's reachable
+# from the other apollon-aegis services (fast-api, airflow, etc.) by
+# container name, alongside its own dedicated network.
+#
+# apollon-aegis-network is declared `external` below because it's created
+# by the main /opt/apollon-aegis docker-compose.yml, not by this file. It
+# must already exist on the host before `docker compose up` — either
+# because that stack is already running, or because deploy_remote.sh /
+# deploy_git_clone.sh create it first if missing (see attach_network.sh).
 #
 # Usage:
 #   cd postgresql
 #   cp .env.example .env      # adjust credentials if needed
+#   docker network create apollon-aegis-network 2>/dev/null || true
 #   docker compose up -d --build
 #   docker compose logs -f
 #   docker compose down       # data persists in ./data
@@ -39,8 +49,12 @@ services:
       retries: 5
     networks:
       - apollon-aegis-collector-network
+      - apollon-aegis-network
 
 networks:
   apollon-aegis-collector-network:
     name: apollon-aegis-collector-network
     driver: bridge
+  apollon-aegis-network:
+    name: apollon-aegis-network
+    external: true

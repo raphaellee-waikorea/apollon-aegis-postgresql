@@ -6,7 +6,10 @@ set -euo pipefail
 #
 # Standalone health check for an already-deployed instance — run this any
 # time later (without redeploying) to confirm the service is still up.
-# Uses the same deploy.env as deploy_remote.sh.
+# Works regardless of which deployment method was used (deploy_remote.sh's
+# rsync layout in ${REMOTE_DIR} directly, or deploy_git_clone.sh's clone in
+# ${REMOTE_DIR}/${CLONE_DIR_NAME}) — it just looks for whichever one has a
+# docker-compose.yml.
 #
 # Usage:
 #   ./verify_remote.sh
@@ -18,6 +21,7 @@ CONTAINER_NAME="apollon-aegis-collector-postgresql"
 DB_USER="apollon"
 DB_NAME="apollon"
 HOST_PORT="31110"
+SHARED_NETWORK="apollon-aegis-network"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "ERROR: $ENV_FILE not found. Copy deploy.env.example to deploy.env first." >&2
@@ -30,6 +34,7 @@ source "$ENV_FILE"
 : "${REMOTE_USER:?REMOTE_USER not set in deploy.env}"
 : "${REMOTE_DIR:=/opt/apollon-postgresql}"
 : "${REMOTE_PORT:=22}"
+: "${CLONE_DIR_NAME:=postgresql}"
 
 if [[ -z "${REMOTE_PASS:-}" ]]; then
   read -r -s -p "SSH password for ${REMOTE_USER}@${REMOTE_HOST}: " REMOTE_PASS
@@ -45,7 +50,12 @@ fi
 
 "${SSH[@]}" "${REMOTE_USER}@${REMOTE_HOST}" "
   set -e
-  cd '${REMOTE_DIR}'
+  if [ -f '${REMOTE_DIR}/${CLONE_DIR_NAME}/docker-compose.yml' ]; then
+    cd '${REMOTE_DIR}/${CLONE_DIR_NAME}'
+  else
+    cd '${REMOTE_DIR}'
+  fi
+  echo \"--- working dir: \$(pwd) ---\"
 
   echo '--- docker compose ps ---'
   docker compose ps
@@ -73,6 +83,14 @@ fi
     || echo 'WARNING: port ${HOST_PORT} not seen listening on host'
 
   echo
+  echo '--- ${SHARED_NETWORK} attachment check ---'
+  if docker network inspect '${SHARED_NETWORK}' -f '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null | grep -qw '${CONTAINER_NAME}'; then
+    echo '${SHARED_NETWORK}: ATTACHED'
+  else
+    echo 'WARNING: ${CONTAINER_NAME} is not attached to ${SHARED_NETWORK}'
+  fi
+
+  echo
   echo '--- disk usage of data dir ---'
-  du -sh '${REMOTE_DIR}/data' 2>/dev/null || true
+  du -sh ./data 2>/dev/null || true
 "

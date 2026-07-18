@@ -261,6 +261,125 @@ def U0001_db_logging(p_job_id, p_task_name, p_status, p_message,
 # =============================================================================================================================================================================================
 
 # =============================================================================================================================================================================================
+# 수집 결과 DB 저장 (모든 DAG 공통 포맷)
+# ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#   - dag_job_log(Task 실행 상태 로그)와는 별도로, "무엇을 얼마나 수집했는지"를 항목 단위로 기록하는
+#     테이블이다. 모든 DAG가 동일한 포맷/테이블(dag_collect_result)을 사용하므로 Apache Superset 등
+#     BI 도구에서 하나의 테이블만 조회하면 전체 DAG의 수집 현황을 파악할 수 있다.
+#   - 테이블이 없으면 호출 시점에 자동으로 생성한다(CREATE TABLE IF NOT EXISTS).
+#   - job_id 로 작업을 구분하고, run_id 로 실행 회차를 구분한다(dag_job_log 와 동일한 규칙).
+#   - category/item_code/item_name 단위로 한 행씩 저장한다. 개별 종목 수만 건을 수집하는 DAG
+#     (N0011/N0012/N0013 등)는 종목 단위가 아니라 배치/마켓 단위로 요약해서 저장하는 것을 권장한다.
+# ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+COLLECT_RESULT_SCHEMA = "public"
+COLLECT_RESULT_TABLE = "dag_collect_result"
+
+_COLLECT_RESULT_DDL = f"""
+CREATE TABLE IF NOT EXISTS {COLLECT_RESULT_SCHEMA}.{COLLECT_RESULT_TABLE}
+(
+    result_id       BIGSERIAL PRIMARY KEY,
+    job_id          VARCHAR(50)      NOT NULL,     -- 작업 구분 키 (예: 'D0001')
+    dag_id          VARCHAR(250),
+    task_id         VARCHAR(250),
+    run_id          VARCHAR(250),                   -- Airflow DAG Run ID (실행 회차 식별자)
+    logical_date    TIMESTAMPTZ,
+    yyyymmdd        CHAR(8),
+    category        VARCHAR(100),                   -- 수집 대상 분류 (예: 'bond','fx','oil','equity_price', ...)
+    item_code       VARCHAR(200),                    -- 수집 대상 코드
+    item_name       VARCHAR(400),                    -- 수집 대상 명칭
+    row_count       INTEGER          NOT NULL DEFAULT 0,
+    eod_date_min    INTEGER,
+    eod_date_max    INTEGER,
+    file_path       TEXT,
+    message         TEXT,
+    extra           JSONB,
+    created_at      TIMESTAMPTZ      NOT NULL DEFAULT now()
+);
+"""
+
+_COLLECT_RESULT_INDEX_DDL = [
+    f'CREATE INDEX IF NOT EXISTS ix_{COLLECT_RESULT_TABLE}_job_run ON {COLLECT_RESULT_SCHEMA}.{COLLECT_RESULT_TABLE} (job_id, run_id);',
+    f'CREATE INDEX IF NOT EXISTS ix_{COLLECT_RESULT_TABLE}_job_id ON {COLLECT_RESULT_SCHEMA}.{COLLECT_RESULT_TABLE} (job_id);',
+    f'CREATE INDEX IF NOT EXISTS ix_{COLLECT_RESULT_TABLE}_created_at ON {COLLECT_RESULT_SCHEMA}.{COLLECT_RESULT_TABLE} (created_at);',
+]
+
+
+def U0001_db_save_collect_result(p_job_id, p_category, p_item_code, p_item_name,
+                                  p_row_count=0, p_eod_date_min=None, p_eod_date_max=None,
+                                  p_file_path=None, p_message=None, p_context=None, p_extra=None):
+    """
+    DAG의 수집 결과를 dag_collect_result 테이블에 저장한다 (모든 DAG 공통 포맷).
+
+    p_job_id        : 작업 구분 키 (예: 'D0001')
+    p_category      : 수집 대상 분류 (예: 'bond', 'fx', 'oil', 'equity_price', 'etf', 'news' ...)
+    p_item_code     : 수집 대상 코드 (종목코드/통화코드/상품코드 등)
+    p_item_name     : 수집 대상 명칭
+    p_row_count     : 수집/저장된 행 수
+    p_eod_date_min  : 수집 데이터의 최소 기준일자(YYYYMMDD, int)
+    p_eod_date_max  : 수집 데이터의 최대 기준일자(YYYYMMDD, int)
+    p_file_path     : 저장된 파일 경로(있는 경우)
+    p_message       : 부가 메시지
+    p_context       : Airflow get_current_context() 결과. dag_id/task_id/run_id 등 자동 추출
+    p_extra         : dict. 그 외 상세정보 - JSONB 로 저장됨
+    """
+    import json
+    import psycopg2
+
+    conn_info = U0001_get_pg_conn_info()
+
+    ti = p_context.get('ti') if p_context else None
+    dag_run = p_context.get('dag_run') if p_context else None
+
+    dag_id = getattr(ti, 'dag_id', None)
+    task_id = getattr(ti, 'task_id', None)
+    run_id = getattr(ti, 'run_id', None) or getattr(dag_run, 'run_id', None)
+
+    logical_date = None
+    yyyymmdd = None
+    if p_context:
+        logical_date = p_context.get('logical_date') or p_context.get('execution_date')
+        yyyymmdd = p_context.get('ds_nodash')
+
+    extra_json = json.dumps(p_extra, ensure_ascii=False, default=str) if p_extra else None
+
+    conn = psycopg2.connect(
+        host=conn_info["host"],
+        dbname=conn_info["db"],
+        user=conn_info["user"],
+        password=conn_info["password"],
+        port=conn_info["port"],
+        application_name="U0001_db_save_collect_result",
+    )
+    try:
+        with conn:
+            with conn.cursor() as curs:
+                # 결과 테이블이 없으면 생성
+                curs.execute(_COLLECT_RESULT_DDL)
+                for ddl in _COLLECT_RESULT_INDEX_DDL:
+                    curs.execute(ddl)
+
+                curs.execute(
+                    f"""
+                    INSERT INTO {COLLECT_RESULT_SCHEMA}.{COLLECT_RESULT_TABLE}
+                        (job_id, dag_id, task_id, run_id, logical_date, yyyymmdd,
+                         category, item_code, item_name, row_count,
+                         eod_date_min, eod_date_max, file_path, message, extra)
+                    VALUES
+                        (%s, %s, %s, %s, %s, %s,
+                         %s, %s, %s, %s,
+                         %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        p_job_id, dag_id, task_id, run_id, logical_date, yyyymmdd,
+                        p_category, p_item_code, p_item_name, int(p_row_count or 0),
+                        p_eod_date_min, p_eod_date_max, p_file_path, p_message, extra_json,
+                    ),
+                )
+    finally:
+        conn.close()
+# =============================================================================================================================================================================================
+
+# =============================================================================================================================================================================================
 # 종목 세세 수집 - NAVER
 # ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 def U0001_naver_chartdata(p_code, p_count):

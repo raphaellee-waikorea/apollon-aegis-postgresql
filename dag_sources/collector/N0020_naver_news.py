@@ -1,6 +1,7 @@
 import pendulum
 from airflow.decorators import dag, task
 from airflow.datasets import Dataset
+from airflow.models.param import Param
 from airflow.operators.python import get_current_context
 from airflow.utils.task_group import TaskGroup
 
@@ -80,6 +81,25 @@ def _to_pct_int(text: str) -> int:
     # "30%" / "60대↑" 등에서 숫자만 뽑기
     m = re.findall(r"\d+", text)
     return int(m[0]) if m else 0
+
+
+def _build_date_list(p_start_date, p_end_date, p_descending: bool = True) -> list[str]:
+    """
+    수집 대상 날짜 구간(YYYYMMDD 문자열)을 받아 해당 구간의 날짜 리스트(YYYYMMDD)를 반환한다.
+    - 특정 하루만 수집하려면 p_start_date == p_end_date 로 입력하면 된다.
+    - start > end 로 입력된 경우에도 자동으로 순서를 맞춰서 처리한다.
+    - p_descending=True(기본값): 최근 일자 -> 과거 일자 순으로 역순 정렬해서 반환한다.
+      (최근 뉴스를 먼저 수집하고 싶을 때 사용. 오름차순이 필요하면 False 로 지정)
+    """
+    d_start = pendulum.from_format(str(p_start_date), "YYYYMMDD", tz=KST).date()
+    d_end = pendulum.from_format(str(p_end_date), "YYYYMMDD", tz=KST).date()
+    if d_end < d_start:
+        d_start, d_end = d_end, d_start
+    dates = pandas.date_range(start=d_start, end=d_end, freq="D")
+    date_list = [d.strftime("%Y%m%d") for d in dates]
+    if p_descending:
+        date_list = list(reversed(date_list))
+    return date_list
 
 LIST_MEDIA_CSV = """
 Y,023,조선일보
@@ -174,6 +194,15 @@ N,629,더팩트
     schedule=[module_DATA.DS_A0003],  # 달력/트리거 Dataset
     catchup=False,
     tags=["N0020_naver_news", "News"],
+    params={
+        # 뉴스 수집 대상 날짜 구간 (YYYYMMDD). Airflow 화면에서 "Trigger DAG w/ config" 로 직접 입력 가능.
+        # - 둘 다 미입력 시: DAG 실행일(logical date) 하루만 수집한다.
+        # - 특정 하루만 수집하려면 start_date/end_date 를 동일한 값으로 입력한다.
+        "start_date": Param(None, type=["null", "string"],
+                             description="수집 시작일자 (YYYYMMDD). 미입력 시 DAG 실행일을 사용."),
+        "end_date": Param(None, type=["null", "string"],
+                           description="수집 종료일자 (YYYYMMDD). 미입력 시 start_date 와 동일(=하루만 수집)."),
+    },
 )
 def N0020_naver_news():
     list_media = parse_media_csv(LIST_MEDIA_CSV)
@@ -191,7 +220,8 @@ def N0020_naver_news():
             # 🔧 통일된 경로 사용
             os.makedirs(NEWS_BASE_DIR, exist_ok=True)
 
-            base_date = ctx["ds_nodash"]
+            raw_params = ctx.get("params") or {}
+            base_date = raw_params.get("start_date") or ctx["ds_nodash"]
             oid = '023'  # 샘플
             base_url = 'https://news.naver.com/main/list.naver'
             param = {'mode': 'LPOD','mid': 'sec','listType': 'title','oid': str(oid),'date': str(base_date),'page': '1'}
@@ -225,51 +255,61 @@ def N0020_naver_news():
             return False
 
     @task
-    def collect_news_list(p_date=None, p_code=None, p_file_full_path_title: str = "", p_dummy=None) -> pandas.DataFrame:
+    def collect_news_list(p_code=None, p_file_full_path_title: str = "", p_dummy=None) -> pandas.DataFrame:
         ctx = get_current_context()
         t_start = pendulum.now(KST)
 
-        if p_date in (None, "", 0):
-            p_date = ctx["ds_nodash"]
+        # 🔧 날짜 구간 입력: Airflow "Trigger DAG w/ config" 의 params.start_date/end_date 로 지정.
+        # 둘 다 미입력이면 DAG 실행일(logical date) 하루만 수집한다.
+        # 특정 하루만 수집하려면 start_date == end_date 로 입력하면 된다.
+        raw_params = ctx.get("params") or {}
+        p_start_date = raw_params.get("start_date") or ctx["ds_nodash"]
+        p_end_date = raw_params.get("end_date") or p_start_date
+        # 🔧 수집 순서: 최근 일자 -> 과거 일자 역순으로 수집한다 (p_descending=True, 기본값).
+        date_list = _build_date_list(p_start_date, p_end_date, p_descending=True)
 
         module_UTIL.U0001_db_logging(
-            JOB_ID, 'collect_news_list', 'STARTED', f'collect_news_list is started. (media={p_code})',
+            JOB_ID, 'collect_news_list', 'STARTED',
+            f'collect_news_list is started. (media={p_code}, start={p_start_date}, end={p_end_date}, '
+            f'days={len(date_list)}, order=desc(recent-first))',
             p_context=ctx, p_start_time=t_start,
-            p_extra={"media_code": p_code, "p_date": p_date},
+            p_extra={"media_code": p_code, "p_start_date": p_start_date, "p_end_date": p_end_date,
+                     "date_list": date_list, "order": "desc(recent-first)"},
         )
         try:
             list_news = list()
-            for page in range(1, 20):
-                base_url = 'https://news.naver.com/main/list.naver'
-                param = {'mode': 'LPOD','mid': 'sec','listType': 'title','oid': str(p_code),'date': str(p_date),'page': str(page)}
-                results = module_UTIL.U0001_collect(base_url, param)
-                soup = bs4.BeautifulSoup(results.content, 'html.parser')
-                news_table = soup.find_all('ul')
+            for p_date in date_list:
+                for page in range(1, 20):
+                    base_url = 'https://news.naver.com/main/list.naver'
+                    param = {'mode': 'LPOD','mid': 'sec','listType': 'title','oid': str(p_code),'date': str(p_date),'page': str(page)}
+                    results = module_UTIL.U0001_collect(base_url, param)
+                    soup = bs4.BeautifulSoup(results.content, 'html.parser')
+                    news_table = soup.find_all('ul')
 
-                for tag_ul in news_table:
-                    if 'https://n.news.naver.com/' not in str(tag_ul):
-                        continue
-                    for a_html in str(tag_ul).split('</a>'):
-                        if '<a' not in a_html:
+                    for tag_ul in news_table:
+                        if 'https://n.news.naver.com/' not in str(tag_ul):
                             continue
-                        tag_a = '<a' + a_html.split('<a')[1] + '</a>'
-                        html_a = bs4.BeautifulSoup(tag_a, 'html.parser')
-                        a_tag = html_a.find('a')
-                        if not a_tag or not a_tag.get('href'):
-                            continue
+                        for a_html in str(tag_ul).split('</a>'):
+                            if '<a' not in a_html:
+                                continue
+                            tag_a = '<a' + a_html.split('<a')[1] + '</a>'
+                            html_a = bs4.BeautifulSoup(tag_a, 'html.parser')
+                            a_tag = html_a.find('a')
+                            if not a_tag or not a_tag.get('href'):
+                                continue
 
-                        article_link = a_tag['href']
-                        article_title = html_a.get_text(strip=True)
+                            article_link = a_tag['href']
+                            article_title = html_a.get_text(strip=True)
 
-                        list_news.append({
-                            'news_date': p_date,
-                            'news_code': p_code,
-                            'news_url': article_link,
-                            'news_title': article_title,
-                            'news_collect_yn': 'N',
-                        })
-                # 🔧 서버 부하 방지를 위한 요청 간 유휴시간 (원본 유지)
-                time.sleep(0.5)
+                            list_news.append({
+                                'news_date': p_date,
+                                'news_code': p_code,
+                                'news_url': article_link,
+                                'news_title': article_title,
+                                'news_collect_yn': 'N',
+                            })
+                    # 🔧 서버 부하 방지를 위한 요청 간 유휴시간 (원본 유지)
+                    time.sleep(0.5)
 
             df_list = pandas.DataFrame(list_news)
             # 🔧 제목 parquet 저장
@@ -277,13 +317,16 @@ def N0020_naver_news():
                 os.makedirs(os.path.dirname(p_file_full_path_title), exist_ok=True)
                 df_list.to_parquet(p_file_full_path_title, index=False, compression='gzip')
 
-            module_UTIL.U0001_logging(f"[{p_code}] 수집대상 뉴스 건수={len(list_news)} (저장: {p_file_full_path_title})")
+            module_UTIL.U0001_logging(
+                f"[{p_code}] 수집대상 뉴스 건수={len(list_news)} (기간: {p_start_date}~{p_end_date}, 저장: {p_file_full_path_title})"
+            )
 
             t_end = pendulum.now(KST)
             module_UTIL.U0001_db_logging(
                 JOB_ID, 'collect_news_list', 'SUCCESS', 'collect_news_list is finished.',
                 p_section_count=len(list_news), p_context=ctx, p_start_time=t_start, p_end_time=t_end,
-                p_extra={"media_code": p_code, "p_date": p_date, "file_path": p_file_full_path_title},
+                p_extra={"media_code": p_code, "p_start_date": p_start_date, "p_end_date": p_end_date,
+                         "date_list": date_list, "file_path": p_file_full_path_title},
             )
             return df_list
         except Exception as e:
@@ -291,7 +334,8 @@ def N0020_naver_news():
             module_UTIL.U0001_db_logging(
                 JOB_ID, 'collect_news_list', 'FAILED', f'collect_news_list failed: {e}',
                 p_context=ctx, p_start_time=t_start, p_end_time=t_end,
-                p_extra={"media_code": p_code, "p_date": p_date, "error": str(e), "error_type": type(e).__name__},
+                p_extra={"media_code": p_code, "p_start_date": p_start_date, "p_end_date": p_end_date,
+                         "error": str(e), "error_type": type(e).__name__},
             )
             raise
 
@@ -670,6 +714,16 @@ def N0020_naver_news():
             article_count = int(out.shape[0])
             comment_count = int(df_comments.shape[0]) if df_comments is not None else 0
 
+            # 이번 실행에서 실제로 수집된 뉴스 날짜 구간(YYYYMMDD -> int) 산출
+            # (요청한 start_date~end_date 구간 중 실제 기사가 존재했던 날짜 기준)
+            eod_date_min = None
+            eod_date_max = None
+            if 'news_date' in out.columns and not out['news_date'].dropna().empty:
+                news_dates_int = pandas.to_numeric(out['news_date'], errors='coerce').dropna().astype(int)
+                if not news_dates_int.empty:
+                    eod_date_min = int(news_dates_int.min())
+                    eod_date_max = int(news_dates_int.max())
+
             # 매체별 수집 결과를 모든 DAG 공통 포맷(dag_collect_result)에 저장 (Superset 등 BI 조회용)
             module_UTIL.U0001_db_save_collect_result(
                 p_job_id=JOB_ID,
@@ -677,6 +731,8 @@ def N0020_naver_news():
                 p_item_code=media_code,
                 p_item_name=media_name,
                 p_row_count=article_count,
+                p_eod_date_min=eod_date_min,
+                p_eod_date_max=eod_date_max,
                 p_message=f"article={article_count}, comment={comment_count}",
                 p_context=ctx,
                 p_extra={
@@ -803,7 +859,6 @@ def N0020_naver_news():
 
         with TaskGroup(group_id=f"G_{media_code}", tooltip=f"{media_name} 수집 파이프라인") as grp:
             t_list = collect_news_list.override(task_id=f"list_{media_code}")(
-                p_date=None,
                 p_code=media_code,
                 p_file_full_path_title=file_full_path_title,
                 p_dummy=flag_available

@@ -163,6 +163,13 @@ _JOB_LOG_INDEX_DDL = [
     f'CREATE INDEX IF NOT EXISTS ix_{JOB_LOG_TABLE}_exec_time ON {JOB_LOG_SCHEMA}.{JOB_LOG_TABLE} (exec_time);',
 ]
 
+# 여러 Task(프로세스)가 동시에 U0001_db_logging() 을 호출하면 각자 "테이블/인덱스가 없으면 생성"
+# DDL을 동시에 실행하게 되는데, PostgreSQL 에서 CREATE TABLE/INDEX IF NOT EXISTS 를 여러 세션이
+# 동시에 실행하면 카탈로그 락 순서 문제로 deadlock detected 가 발생할 수 있다.
+# -> advisory lock 으로 DDL 구간만 직렬화하고, 같은 프로세스 내에서는 최초 1회만 DDL 을 실행한다.
+_JOB_LOG_DDL_LOCK_ID = 90010001
+_JOB_LOG_TABLE_READY = False
+
 
 def U0001_db_logging(p_job_id, p_task_name, p_status, p_message,
                       p_section_count=0, p_section_value=0.0,
@@ -186,6 +193,8 @@ def U0001_db_logging(p_job_id, p_task_name, p_status, p_message,
     import json
     import socket
     import psycopg2
+
+    global _JOB_LOG_TABLE_READY
 
     conn_info = U0001_get_pg_conn_info()
 
@@ -231,10 +240,17 @@ def U0001_db_logging(p_job_id, p_task_name, p_status, p_message,
     try:
         with conn:
             with conn.cursor() as curs:
-                # 로그 테이블이 없으면 생성
-                curs.execute(_JOB_LOG_DDL)
-                for ddl in _JOB_LOG_INDEX_DDL:
-                    curs.execute(ddl)
+                # 로그 테이블/인덱스가 없으면 생성 (프로세스 내 최초 1회만; 동시성으로 인한 deadlock 방지를 위해
+                # advisory lock 으로 DDL 구간을 직렬화한다)
+                if not _JOB_LOG_TABLE_READY:
+                    curs.execute("SELECT pg_advisory_lock(%s)", (_JOB_LOG_DDL_LOCK_ID,))
+                    try:
+                        curs.execute(_JOB_LOG_DDL)
+                        for ddl in _JOB_LOG_INDEX_DDL:
+                            curs.execute(ddl)
+                    finally:
+                        curs.execute("SELECT pg_advisory_unlock(%s)", (_JOB_LOG_DDL_LOCK_ID,))
+                    _JOB_LOG_TABLE_READY = True
 
                 curs.execute(
                     f"""
@@ -303,6 +319,11 @@ _COLLECT_RESULT_INDEX_DDL = [
     f'CREATE INDEX IF NOT EXISTS ix_{COLLECT_RESULT_TABLE}_created_at ON {COLLECT_RESULT_SCHEMA}.{COLLECT_RESULT_TABLE} (created_at);',
 ]
 
+# U0001_db_logging 과 동일한 이유(동시 DDL 실행으로 인한 deadlock detected 방지)로,
+# advisory lock + 프로세스 내 1회 실행 캐시를 사용한다. lock id 는 dag_job_log 와 겹치지 않게 별도로 둔다.
+_COLLECT_RESULT_DDL_LOCK_ID = 90010002
+_COLLECT_RESULT_TABLE_READY = False
+
 
 def U0001_db_save_collect_result(p_job_id, p_category, p_item_code, p_item_name,
                                   p_row_count=0, p_eod_date_min=None, p_eod_date_max=None,
@@ -324,6 +345,8 @@ def U0001_db_save_collect_result(p_job_id, p_category, p_item_code, p_item_name,
     """
     import json
     import psycopg2
+
+    global _COLLECT_RESULT_TABLE_READY
 
     conn_info = U0001_get_pg_conn_info()
 
@@ -353,10 +376,17 @@ def U0001_db_save_collect_result(p_job_id, p_category, p_item_code, p_item_name,
     try:
         with conn:
             with conn.cursor() as curs:
-                # 결과 테이블이 없으면 생성
-                curs.execute(_COLLECT_RESULT_DDL)
-                for ddl in _COLLECT_RESULT_INDEX_DDL:
-                    curs.execute(ddl)
+                # 결과 테이블/인덱스가 없으면 생성 (프로세스 내 최초 1회만; 동시성으로 인한 deadlock 방지를 위해
+                # advisory lock 으로 DDL 구간을 직렬화한다)
+                if not _COLLECT_RESULT_TABLE_READY:
+                    curs.execute("SELECT pg_advisory_lock(%s)", (_COLLECT_RESULT_DDL_LOCK_ID,))
+                    try:
+                        curs.execute(_COLLECT_RESULT_DDL)
+                        for ddl in _COLLECT_RESULT_INDEX_DDL:
+                            curs.execute(ddl)
+                    finally:
+                        curs.execute("SELECT pg_advisory_unlock(%s)", (_COLLECT_RESULT_DDL_LOCK_ID,))
+                    _COLLECT_RESULT_TABLE_READY = True
 
                 curs.execute(
                     f"""

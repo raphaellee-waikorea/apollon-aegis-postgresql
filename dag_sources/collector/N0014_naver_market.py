@@ -39,12 +39,12 @@ JOB_ID = "N0014"
 COLLECT_SLEEP_SEC = 2
 
 # 컨테이너 내부 기본값(환경변수로 덮어쓰기 가능)
-ROOT_DIR = os.environ.get("APOLLON_DATA_ROOT", "/opt/apollon-data/finance-data/work")
+WORK_DIR = "/opt/apollon-data/finance-data/work"
 DIRS = {
-    "jewelry":  os.path.join(ROOT_DIR, "jewelry"),
-    "material": os.path.join(ROOT_DIR, "material"),
-    "oil":      os.path.join(ROOT_DIR, "oil"),
-    "market":   os.path.join(ROOT_DIR, "market"),
+    "jewelry":  os.path.join(WORK_DIR, "jewelry"),
+    "material": os.path.join(WORK_DIR, "material"),
+    "oil":      os.path.join(WORK_DIR, "oil"),
+    "market":   os.path.join(WORK_DIR, "market"),
 }
 
 # 조기 종료/제어 파라미터
